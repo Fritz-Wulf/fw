@@ -1,0 +1,23 @@
+name: validate
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: sh -n bin/fw bin/fwulf bin/fritzwulf
+      - name: Shellcheck
+        run: shellcheck -s sh bin/fw bin/fwulf bin/fritzwulf
+      - name: Unit tests
+        run: python3 -m unittest -q tests.test_fw
+      - name: Repository secret-pattern check
+        run: |
+          if grep -RInE 'BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}' --exclude-dir=.git .; then
+            echo 'secret-like material detected' >&2
+            exit 1
+          fi
