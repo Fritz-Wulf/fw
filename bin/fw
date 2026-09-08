@@ -1,0 +1,155 @@
+#!/bin/sh
+set -u
+
+SELF_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH='' cd "$SELF_DIR/.." && pwd)
+VERSION=$(cat "$ROOT_DIR/VERSION" 2>/dev/null || printf '%s' '0.0.0-unknown')
+FW_REPO_BASE=${FW_REPO_BASE:-https://fritz-wulf.github.io/repo/}
+FW_INDEX_URL=${FW_REPO_INDEX_URL:-${FW_REPO_BASE%/}/index.json}
+FW_PACKAGES_URL=${FW_PACKAGES_URL:-${FW_REPO_BASE%/}/Packages}
+FW_CACHE_DIR=${FW_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/fritzwulf}
+INDEX_CACHE=$FW_CACHE_DIR/index.json
+PACKAGES_CACHE=$FW_CACHE_DIR/Packages
+JSON=0
+QUIET=0
+
+log(){ [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+fail(){ code=$1; shift; printf 'fw: %s\n' "$*" >&2; exit "$code"; }
+json_escape(){ printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --quiet|-q) QUIET=1; shift ;;
+    --) shift; break ;;
+    -*) fail 64 "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+fetch_url(){
+  url=$1; dest=$2
+  case "$url" in
+    file://*) cp "${url#file://}" "$dest" || return 1 ;;
+    *)
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --retry 2 -o "$dest" "$url" || return 1
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$dest" "$url" || return 1
+      else
+        return 127
+      fi
+      ;;
+  esac
+}
+
+atomic_fetch(){
+  url=$1; dest=$2; target=$2
+  mkdir -p "$FW_CACHE_DIR" || fail 73 "cannot create cache: $FW_CACHE_DIR"
+  tmp=$(mktemp "$FW_CACHE_DIR/.fw.XXXXXX") || fail 73 "cannot create temporary file"
+  if ! fetch_url "$url" "$tmp"; then rm -f "$tmp"; fail 69 "download failed: $url"; fi
+  [ -s "$tmp" ] || { rm -f "$tmp"; fail 65 "empty download: $url"; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; fail 73 "cannot activate cache file"; }
+}
+
+ensure_feed(){ [ -s "$PACKAGES_CACHE" ] || fail 69 "package cache missing; run: fw update"; }
+
+cmd_update(){
+  atomic_fetch "$FW_INDEX_URL" "$INDEX_CACHE"
+  grep -q '"packages"' "$INDEX_CACHE" || fail 65 "index.json does not contain packages"
+  atomic_fetch "$FW_PACKAGES_URL" "$PACKAGES_CACHE"
+  log "repository updated: $FW_INDEX_URL"
+}
+cmd_list(){
+  ensure_feed
+  awk 'BEGIN{RS="";FS="\n"} {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^Installable: /)i=substr($n,14)} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
+}
+
+cmd_search(){
+  ensure_feed
+  [ "$#" -gt 0 ] || fail 64 "search requires a query"
+  query=$1
+  awk -v q="$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')" 'BEGIN{RS="";FS="\n"} tolower($0)~q {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^Installable: /)i=substr($n,14)} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
+}
+
+cmd_info(){
+  ensure_feed
+  [ "$#" -gt 0 ] || fail 64 "info requires a package name"
+  name=$1
+  awk -v wanted="$name" 'BEGIN{RS=""} $0 ~ ("(^|\n)Package: " wanted "(\n|$)") {print; found=1; exit} END{if(!found) exit 1}' "$PACKAGES_CACHE" || fail 66 "package not found: $name"
+}
+
+cmd_version(){
+  if [ "$JSON" -eq 1 ]; then printf '{"name":"fw","version":"%s"}\n' "$(json_escape "$VERSION")"; else printf 'Fritz.Wulf fw %s\n' "$VERSION"; fi
+}
+
+cmd_repo(){
+  if [ "$JSON" -eq 1 ]; then printf '{"base":"%s","index":"%s","packages":"%s"}\n' "$(json_escape "$FW_REPO_BASE")" "$(json_escape "$FW_INDEX_URL")" "$(json_escape "$FW_PACKAGES_URL")"; else printf '%s\n' "$FW_INDEX_URL"; fi
+}
+detect_model(){
+  for path in /proc/device-tree/model /sys/firmware/devicetree/base/model; do
+    if [ -r "$path" ]; then tr -d '\000' < "$path"; return; fi
+  done
+  if [ -r /proc/sys/urlader/environment ]; then
+    value=$(sed -n 's/^ProductID[[:space:]]*//p' /proc/sys/urlader/environment | head -1)
+    [ -n "$value" ] && { printf '%s' "$value"; return; }
+  fi
+  printf '%s' 'unknown'
+}
+
+detect_endianness(){
+  if command -v od >/dev/null 2>&1; then
+    value=$(printf '\001\000' | od -An -t u2 2>/dev/null | tr -d '[:space:]')
+    [ "$value" = 1 ] && { printf '%s' little; return; }
+    [ "$value" = 256 ] && { printf '%s' big; return; }
+  fi
+  printf '%s' unknown
+}
+
+cmd_device(){
+  model=$(detect_model); arch=$(uname -m 2>/dev/null || printf unknown); kernel=$(uname -r 2>/dev/null || printf unknown); endian=$(detect_endianness)
+  if [ "$JSON" -eq 1 ]; then
+    printf '{"model":"%s","architecture":"%s","kernel":"%s","endianness":"%s"}\n' "$(json_escape "$model")" "$(json_escape "$arch")" "$(json_escape "$kernel")" "$(json_escape "$endian")"
+  else
+    printf 'model: %s\narchitecture: %s\nkernel: %s\nendianness: %s\n' "$model" "$arch" "$kernel" "$endian"
+  fi
+}
+
+cmd_doctor(){
+  printf 'fw version: %s\n' "$VERSION"
+  printf 'repository: %s\n' "$FW_INDEX_URL"
+  printf 'fetcher: '; if command -v curl >/dev/null 2>&1; then printf 'curl\n'; elif command -v wget >/dev/null 2>&1; then printf 'wget\n'; else printf 'missing\n'; fi
+  printf 'cache: %s\n' "$FW_CACHE_DIR"
+}
+cmd_help(){
+  cat <<'EOF'
+Fritz.Wulf package manager foundation
+Usage: fw [--json] [--quiet] <command> [args]
+
+Commands:
+  version          show client version
+  repo             show canonical repository index
+  device           show safe local device facts
+  doctor           inspect client prerequisites
+  update           refresh index.json and Packages atomically
+  list             list cached packages
+  search <query>   search cached package metadata
+  info <name>      show one cached package record
+
+This foundation release performs no package installation and no firmware flash.
+EOF
+}
+
+command=${1:-help}
+if [ "$#" -gt 0 ]; then shift; fi
+case "$command" in
+  version) cmd_version "$@" ;;
+  repo) cmd_repo "$@" ;;
+  device) cmd_device "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  update) cmd_update "$@" ;;
+  list) cmd_list "$@" ;;
+  search) cmd_search "$@" ;;
+  info) cmd_info "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) fail 64 "unknown command: $command" ;;
+esac
