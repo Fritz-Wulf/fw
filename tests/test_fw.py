@@ -15,7 +15,7 @@ class FwTest(unittest.TestCase):
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
-        self.assertIn("0.1.1", expected.stdout)
+        self.assertIn("0.2.0", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
             got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(got.stdout, expected.stdout)
@@ -42,6 +42,19 @@ class FwTest(unittest.TestCase):
             info = self.run_fw("info", "fw", env=env)
             self.assertIn("Package: fw", info.stdout)
             self.assertIn("X-Fritz-Wulf-Installable: no", info.stdout)
+            verified = self.run_fw("verify", "fw", "0.1.0", env=env)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertIn("verified: fw 0.1.0", verified.stdout)
+
+    def test_verify_fails_closed_on_checksum_mismatch(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            bad = Path(cache) / "Packages"
+            bad.write_text(bad.read_text().replace("32dfcc02", "02dfcc02"), encoding="utf-8")
+            got = self.run_fw("verify", "fw", "0.1.0", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("checksum mismatch", got.stderr)
 
     def test_device_json_has_safe_structured_fields(self):
         got = self.run_fw("--json", "device")
