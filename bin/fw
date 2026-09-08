@@ -61,14 +61,14 @@ cmd_update(){
 }
 cmd_list(){
   ensure_feed
-  awk 'BEGIN{RS="";FS="\n"} {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^Installable: /)i=substr($n,14)} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
+  awk 'BEGIN{RS="";FS="\n"} {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^(Installable|X-Fritz-Wulf-Installable): /){i=$n;sub(/^[^:]+: /,"",i)}} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
 }
 
 cmd_search(){
   ensure_feed
   [ "$#" -gt 0 ] || fail 64 "search requires a query"
   query=$1
-  awk -v q="$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')" 'BEGIN{RS="";FS="\n"} tolower($0)~q {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^Installable: /)i=substr($n,14)} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
+  awk -v q="$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')" 'BEGIN{RS="";FS="\n"} tolower($0)~q {p=v=a=i=""; for(n=1;n<=NF;n++){if($n~/^Package: /)p=substr($n,10); else if($n~/^Version: /)v=substr($n,10); else if($n~/^Architecture: /)a=substr($n,15); else if($n~/^(Installable|X-Fritz-Wulf-Installable): /){i=$n;sub(/^[^:]+: /,"",i)}} if(p!="") printf "%s\t%s\t%s\t%s\n",p,v,a,i}' "$PACKAGES_CACHE"
 }
 
 cmd_info(){

@@ -15,7 +15,7 @@ class FwTest(unittest.TestCase):
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
-        self.assertIn("0.1.0", expected.stdout)
+        self.assertIn("0.1.1", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
             got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(got.stdout, expected.stdout)
@@ -34,14 +34,14 @@ class FwTest(unittest.TestCase):
             self.assertTrue((Path(cache) / "index.json").is_file())
             self.assertTrue((Path(cache) / "Packages").is_file())
             listed = self.run_fw("list", env=env)
-            self.assertIn("fw\t0.1.0", listed.stdout)
+            self.assertIn("fw\t0.1.0\tall\tno", listed.stdout)
             self.assertIn("yourfritz-fitdump", listed.stdout)
             found = self.run_fw("search", "yourfritz", env=env)
             self.assertIn("yourfritz-fitdump", found.stdout)
             self.assertNotIn("fw\t0.1.0", found.stdout)
             info = self.run_fw("info", "fw", env=env)
             self.assertIn("Package: fw", info.stdout)
-            self.assertIn("Installable: yes", info.stdout)
+            self.assertIn("X-Fritz-Wulf-Installable: no", info.stdout)
 
     def test_device_json_has_safe_structured_fields(self):
         got = self.run_fw("--json", "device")
