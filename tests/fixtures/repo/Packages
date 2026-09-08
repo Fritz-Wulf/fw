@@ -2,12 +2,12 @@ Package: fw
 Version: 0.1.0
 Architecture: all
 Description: Fritz.Wulf package manager
-Installable: yes
+X-Fritz-Wulf-Installable: no
 Source: Fritz-Wulf/fw
 
 Package: yourfritz-fitdump
 Version: git-20220623-a
 Architecture: all
 Description: Historical FIT dump source
-Installable: no
+X-Fritz-Wulf-Installable: no
 Source: PeterPawn/YourFritz
