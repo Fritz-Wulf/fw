@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, tempfile, unittest
+import hashlib, json, os, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +15,7 @@ class FwTest(unittest.TestCase):
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
-        self.assertIn("0.3.0", expected.stdout)
+        self.assertIn("0.4.0", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
             got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(got.stdout, expected.stdout)
@@ -100,6 +100,61 @@ class FwTest(unittest.TestCase):
         self.assertIn("architecture", data)
         self.assertIn("kernel", data)
         self.assertIn("endianness", data)
+
+
+    def test_compatible_checks_structured_device_targets(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache, "FW_DEVICE_PROFILE": "7490"}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            good = self.run_fw("compatible", "fw", "0.1.0", env=env)
+            self.assertEqual(good.returncode, 0, good.stderr)
+            self.assertIn("compatible: fw 0.1.0 on 7490", good.stdout)
+            machine = self.run_fw("--json", "compatible", "fw", "0.1.0", env=env)
+            self.assertEqual(machine.returncode, 0, machine.stderr)
+            data = json.loads(machine.stdout)
+            self.assertEqual(data["device"], "7490")
+            self.assertTrue(data["compatible"])
+            self.assertEqual(data["installable"], "no")
+            source = self.run_fw("compatible", "yourfritz-fitdump", "git-20220623-a", env=env)
+            self.assertNotEqual(source.returncode, 0)
+            self.assertIn("no verified device targets", source.stderr)
+
+    def test_compatible_fails_closed_for_unknown_device(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache, "FW_DEVICE_PROFILE": "unknown"}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            got = self.run_fw("compatible", "fw", "0.1.0", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("device profile unknown", got.stderr)
+
+
+    def test_compatible_rejects_missing_device_contract(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as repo:
+            shutil.copytree(FIXTURE, repo, dirs_exist_ok=True)
+            packages = Path(repo) / "Packages"
+            packages.write_text(packages.read_text().replace("X-Fritz-Wulf-Devices: 3270,7490,7530,7590\n", "", 1))
+            index = Path(repo) / "index.json"
+            sums = Path(repo) / "SHA256SUMS"
+            sums.write_text(f"{hashlib.sha256(index.read_bytes()).hexdigest()}  index.json\n{hashlib.sha256(packages.read_bytes()).hexdigest()}  Packages\n")
+            env = {"FW_REPO_BASE": Path(repo).as_uri() + "/", "FW_CACHE_DIR": cache, "FW_DEVICE_PROFILE": "7490"}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            got = self.run_fw("compatible", "fw", "0.1.0", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("device targets missing", got.stderr)
+
+    def test_compatible_rejects_unverified_architecture(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as repo:
+            shutil.copytree(FIXTURE, repo, dirs_exist_ok=True)
+            packages = Path(repo) / "Packages"
+            packages.write_text(packages.read_text().replace("Architecture: all", "Architecture: mips32", 1))
+            index = Path(repo) / "index.json"
+            sums = Path(repo) / "SHA256SUMS"
+            sums.write_text(f"{hashlib.sha256(index.read_bytes()).hexdigest()}  index.json\n{hashlib.sha256(packages.read_bytes()).hexdigest()}  Packages\n")
+            env = {"FW_REPO_BASE": Path(repo).as_uri() + "/", "FW_CACHE_DIR": cache, "FW_DEVICE_PROFILE": "7490"}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            got = self.run_fw("compatible", "fw", "0.1.0", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("architecture compatibility not verified", got.stderr)
 
 if __name__ == "__main__":
     unittest.main()

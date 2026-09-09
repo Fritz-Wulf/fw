@@ -12,7 +12,7 @@ Human-readable catalog:
 
 ## Current status
 
-Version `0.3.0` remains non-installing and non-flashing. It adds repository-metadata integrity checks: `fw update` stages `SHA256SUMS`, `index.json`, and `Packages`, validates the latter two against the manifest, and only then activates the refreshed cache. Exact package artifact verification remains available through `fw verify`. It can identify the local platform, refresh repository metadata, list/search package records, inspect package information, and verify an exact package version by size and SHA-256 before any future installation workflow exists.
+Version `0.4.0` remains non-installing and non-flashing. In addition to transactional repository-metadata integrity and exact artifact verification, it adds `fw compatible` for fail-closed, read-only checks against the repository's machine-readable device targets. Unknown devices, missing target metadata, source-only entries, and non-`all` architectures without an implemented ABI mapper are rejected rather than guessed.
 
 Entry points are equivalent:
 
@@ -33,6 +33,7 @@ fw update
 fw list
 fw search <query>
 fw info <package>
+fw compatible <package> [version]
 fw verify <package> <version>
 ```
 
@@ -43,6 +44,8 @@ Global options currently include `--json` and `--quiet`.
 `fw update` downloads both `index.json` and the generated `Packages` compatibility feed into an atomic local cache. `index.json` remains the canonical public data contract; `Packages` is generated from the same metadata and provides a small POSIX/awk-friendly view for early router clients.
 
 Historical source snapshots remain visible but are not silently treated as installable packages.
+
+`FW_DEVICE_PROFILE` may be set to one of `3270`, `7490`, `7530`, or `7590` for read-only compatibility diagnostics and tests. It is not an authorization mechanism for any future install or flash operation; such operations must use independently detected hardware facts.
 
 ## Safety
 

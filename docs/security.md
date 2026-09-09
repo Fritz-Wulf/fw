@@ -19,3 +19,6 @@ The signed-repository phase must add a detached signature over a canonical repos
 ## Repository metadata integrity
 
 `fw update` downloads `SHA256SUMS`, `index.json`, and `Packages` into a staging directory. The client validates the SHA-256 of `index.json` and `Packages` against the downloaded manifest before replacing the active cache. A mismatch aborts the refresh and preserves the previous cache. This improves consistency and corruption detection but does not authenticate a maliciously replaced manifest; detached signature enforcement remains the next trust-boundary step.
+## Compatibility gate
+
+`fw compatible` consumes `X-Fritz-Wulf-Devices` from the checksum-verified cached feed. Missing targets, `none`, unknown local profiles, and architectures other than `all` are rejected until an explicit ABI mapper exists. `FW_DEVICE_PROFILE` is diagnostic-only and must never become an install or flash authorization bypass.

@@ -3,7 +3,24 @@
   "name": "Fritz.Wulf",
   "base_url": "file://fixture/",
   "packages": [
-    {"name":"fw","version":"0.1.0","architecture":"all","installable":true},
-    {"name":"yourfritz-fitdump","version":"git-20220623-a","architecture":"all","installable":false}
+    {
+      "name": "fw",
+      "version": "0.1.0",
+      "architecture": "all",
+      "installable": true,
+      "devices": [
+        "3270",
+        "7490",
+        "7530",
+        "7590"
+      ]
+    },
+    {
+      "name": "yourfritz-fitdump",
+      "version": "git-20220623-a",
+      "architecture": "all",
+      "installable": false,
+      "devices": []
+    }
   ]
 }
