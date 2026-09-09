@@ -10,9 +10,9 @@ Human-readable catalog:
 
 `https://fritz-wulf.github.io/repo/`
 
-## Foundation status
+## Current status
 
-Version `0.1.0` is intentionally read-only. It can identify the local platform, refresh repository metadata, list/search package records, and inspect package information. It does **not** install packages and it does **not** flash firmware.
+Version `0.2.0` remains non-installing and non-flashing, but adds explicit artifact verification. It can identify the local platform, refresh repository metadata, list/search package records, inspect package information, and verify an exact package version by size and SHA-256 before any future installation workflow exists.
 
 Entry points are equivalent:
 
@@ -33,6 +33,7 @@ fw update
 fw list
 fw search <query>
 fw info <package>
+fw verify <package> <version>
 ```
 
 Global options currently include `--json` and `--quiet`.

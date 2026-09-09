@@ -52,6 +52,13 @@ atomic_fetch(){
 }
 
 ensure_feed(){ [ -s "$PACKAGES_CACHE" ] || fail 69 "package cache missing; run: fw update"; }
+sha256_file(){
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v busybox >/dev/null 2>&1; then busybox sha256sum "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else return 127
+  fi
+}
 
 cmd_update(){
   atomic_fetch "$FW_INDEX_URL" "$INDEX_CACHE"
@@ -76,6 +83,33 @@ cmd_info(){
   [ "$#" -gt 0 ] || fail 64 "info requires a package name"
   name=$1
   awk -v wanted="$name" 'BEGIN{RS=""} $0 ~ ("(^|\n)Package: " wanted "(\n|$)") {print; found=1; exit} END{if(!found) exit 1}' "$PACKAGES_CACHE" || fail 66 "package not found: $name"
+}
+
+cmd_verify(){
+  ensure_feed
+  [ "$#" -eq 2 ] || fail 64 "verify requires: <package> <version>"
+  verify_name=$1; verify_version=$2
+  verify_meta=$(mktemp "$FW_CACHE_DIR/.verify-meta.XXXXXX") || fail 73 "cannot create verification metadata"
+  verify_tmp=$(mktemp "$FW_CACHE_DIR/.verify-artifact.XXXXXX") || { rm -f "$verify_meta"; fail 73 "cannot create verification file"; }
+  trap 'rm -f "$verify_meta" "$verify_tmp"' 0 1 2 15
+  awk -v p="$verify_name" -v v="$verify_version" 'BEGIN{RS="";FS="\n"} {pn=vn=""; for(n=1;n<=NF;n++){if($n~/^Package: /)pn=substr($n,10); else if($n~/^Version: /)vn=substr($n,10)} if(pn==p && vn==v){print; found=1; exit}} END{if(!found) exit 1}' "$PACKAGES_CACHE" > "$verify_meta" || fail 66 "package version not found: $verify_name $verify_version"
+  verify_filename=$(sed -n 's/^Filename: //p' "$verify_meta" | head -1)
+  verify_size=$(sed -n 's/^Size: //p' "$verify_meta" | head -1)
+  verify_sha=$(sed -n 's/^SHA256sum: //p' "$verify_meta" | head -1)
+  if [ -z "$verify_filename" ] || [ -z "$verify_size" ] || [ -z "$verify_sha" ]; then
+    fail 65 "incomplete verification metadata"
+  fi
+  case "$verify_filename" in /*|*..*) fail 65 "unsafe package path: $verify_filename" ;; esac
+  case "$verify_size" in ''|*[!0-9]*) fail 65 "invalid package size" ;; esac
+  printf '%s' "$verify_sha" | grep -Eq '^[0-9a-fA-F]{64}$' || fail 65 "invalid package checksum"
+  verify_url=${FW_REPO_BASE%/}/$verify_filename
+  fetch_url "$verify_url" "$verify_tmp" || fail 69 "download failed: $verify_url"
+  verify_actual_size=$(wc -c < "$verify_tmp" | tr -d '[:space:]')
+  [ "$verify_actual_size" = "$verify_size" ] || fail 65 "size mismatch: expected $verify_size got $verify_actual_size"
+  verify_actual_sha=$(sha256_file "$verify_tmp") || fail 69 "no SHA-256 implementation available"
+  [ "$(printf '%s' "$verify_actual_sha" | tr 'A-F' 'a-f')" = "$(printf '%s' "$verify_sha" | tr 'A-F' 'a-f')" ] || fail 65 "checksum mismatch: $verify_name $verify_version"
+  rm -f "$verify_meta" "$verify_tmp"; trap - 0 1 2 15
+  log "verified: $verify_name $verify_version"
 }
 
 cmd_version(){
@@ -134,8 +168,9 @@ Commands:
   list             list cached packages
   search <query>   search cached package metadata
   info <name>      show one cached package record
+  verify <name> <version>  download and verify size + SHA-256
 
-This foundation release performs no package installation and no firmware flash.
+This release performs no package installation and no firmware flash.
 EOF
 }
 
@@ -150,6 +185,7 @@ case "$command" in
   list) cmd_list "$@" ;;
   search) cmd_search "$@" ;;
   info) cmd_info "$@" ;;
+  verify) cmd_verify "$@" ;;
   help|-h|--help) cmd_help ;;
   *) fail 64 "unknown command: $command" ;;
 esac

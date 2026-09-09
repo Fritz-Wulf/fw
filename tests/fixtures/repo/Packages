@@ -2,8 +2,11 @@ Package: fw
 Version: 0.1.0
 Architecture: all
 Description: Fritz.Wulf package manager
-X-Fritz-Wulf-Installable: no
+Filename: fw-0.1.0.tar.gz
+Size: 17
+SHA256sum: 32dfcc02fe339f75e5d08db10ed9b7bbf2df6dc68ea5ae0b4ba3df3799f22a77
 Source: Fritz-Wulf/fw
+X-Fritz-Wulf-Installable: no
 
 Package: yourfritz-fitdump
 Version: git-20220623-a
