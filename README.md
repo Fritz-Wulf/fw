@@ -12,7 +12,7 @@ Human-readable catalog:
 
 ## Current status
 
-Version `0.2.0` remains non-installing and non-flashing, but adds explicit artifact verification. It can identify the local platform, refresh repository metadata, list/search package records, inspect package information, and verify an exact package version by size and SHA-256 before any future installation workflow exists.
+Version `0.3.0` remains non-installing and non-flashing. It adds repository-metadata integrity checks: `fw update` stages `SHA256SUMS`, `index.json`, and `Packages`, validates the latter two against the manifest, and only then activates the refreshed cache. Exact package artifact verification remains available through `fw verify`. It can identify the local platform, refresh repository metadata, list/search package records, inspect package information, and verify an exact package version by size and SHA-256 before any future installation workflow exists.
 
 Entry points are equivalent:
 

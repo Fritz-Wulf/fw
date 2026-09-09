@@ -1,4 +1,4 @@
-import json, os, subprocess, tempfile, unittest
+import json, os, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +15,7 @@ class FwTest(unittest.TestCase):
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
-        self.assertIn("0.2.1", expected.stdout)
+        self.assertIn("0.3.0", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
             got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(got.stdout, expected.stdout)
@@ -45,6 +45,32 @@ class FwTest(unittest.TestCase):
             verified = self.run_fw("verify", "fw", "0.1.0", env=env)
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertIn("verified: fw 0.1.0", verified.stdout)
+
+    def test_update_caches_repository_checksum_manifest(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            got = self.run_fw("update", env=env)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            sums = Path(cache) / "SHA256SUMS"
+            self.assertTrue(sums.is_file())
+            self.assertIn("index.json", sums.read_text())
+            self.assertIn("Packages", sums.read_text())
+
+    def test_update_rejects_manifest_mismatch_without_replacing_cache(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as bad_repo:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            before_index = (Path(cache) / "index.json").read_bytes()
+            before_packages = (Path(cache) / "Packages").read_bytes()
+            shutil.copytree(FIXTURE, bad_repo, dirs_exist_ok=True)
+            packages = Path(bad_repo) / "Packages"
+            packages.write_text(packages.read_text() + "\n# tampered\n", encoding="utf-8")
+            bad_env = {"FW_REPO_BASE": Path(bad_repo).as_uri() + "/", "FW_CACHE_DIR": cache}
+            got = self.run_fw("update", env=bad_env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("repository checksum mismatch", got.stderr)
+            self.assertEqual((Path(cache) / "index.json").read_bytes(), before_index)
+            self.assertEqual((Path(cache) / "Packages").read_bytes(), before_packages)
 
     def test_verify_fails_closed_on_checksum_mismatch(self):
         with tempfile.TemporaryDirectory() as cache:
