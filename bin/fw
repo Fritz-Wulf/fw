@@ -113,6 +113,40 @@ cmd_info(){
   awk -v wanted="$name" 'BEGIN{RS=""} $0 ~ ("(^|\n)Package: " wanted "(\n|$)") {print; found=1; exit} END{if(!found) exit 1}' "$PACKAGES_CACHE" || fail 66 "package not found: $name"
 }
 
+cmd_compatible(){
+  ensure_feed
+  if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    fail 64 "compatible requires: <package> [version]"
+  fi
+  compat_name=$1; compat_wanted_version=${2:-}
+  compat_meta=$(mktemp "$FW_CACHE_DIR/.compatible.XXXXXX") || fail 73 "cannot create compatibility metadata"
+  trap 'rm -f "$compat_meta"' 0 1 2 15
+  awk -v p="$compat_name" -v v="$compat_wanted_version" 'BEGIN{RS="";FS="\n"} {pn=vn=""; for(n=1;n<=NF;n++){if($n~/^Package: /)pn=substr($n,10); else if($n~/^Version: /)vn=substr($n,10)} if(pn==p && (v=="" || vn==v)){print; print ""}}' "$PACKAGES_CACHE" > "$compat_meta"
+  compat_count=$(grep -c '^Package: ' "$compat_meta" 2>/dev/null || true)
+  [ "$compat_count" -gt 0 ] || fail 66 "package version not found: $compat_name ${compat_wanted_version:-<unspecified>}"
+  [ "$compat_count" -eq 1 ] || fail 64 "multiple package versions found; specify version"
+  compat_version=$(sed -n 's/^Version: //p' "$compat_meta" | head -1)
+  compat_arch=$(sed -n 's/^Architecture: //p' "$compat_meta" | head -1)
+  compat_devices=$(sed -n 's/^X-Fritz-Wulf-Devices: //p' "$compat_meta" | head -1)
+  compat_installable=$(sed -n 's/^X-Fritz-Wulf-Installable: //p' "$compat_meta" | head -1)
+  [ -n "$compat_devices" ] || fail 65 "package device targets missing: $compat_name $compat_version"
+  compat_profile=$(detect_profile)
+  [ "$compat_profile" != unknown ] || fail 65 "device profile unknown"
+  [ "$compat_devices" != none ] || fail 65 "package has no verified device targets: $compat_name $compat_version"
+  case ",$compat_devices," in
+    *",$compat_profile,"*) ;;
+    *) fail 65 "package not compatible with device profile $compat_profile: $compat_name $compat_version" ;;
+  esac
+  [ "$compat_arch" = all ] || fail 65 "architecture compatibility not verified: $compat_arch"
+  rm -f "$compat_meta"; trap - 0 1 2 15
+  if [ "$JSON" -eq 1 ]; then
+    printf '{"package":"%s","version":"%s","device":"%s","compatible":true,"installable":"%s"}
+' "$(json_escape "$compat_name")" "$(json_escape "$compat_version")" "$(json_escape "$compat_profile")" "$(json_escape "$compat_installable")"
+  else
+    log "compatible: $compat_name $compat_version on $compat_profile (installable: ${compat_installable:-unknown})"
+  fi
+}
+
 cmd_verify(){
   ensure_feed
   [ "$#" -eq 2 ] || fail 64 "verify requires: <package> <version>"
@@ -156,6 +190,24 @@ detect_model(){
     [ -n "$value" ] && { printf '%s' "$value"; return; }
   fi
   printf '%s' 'unknown'
+}
+
+detect_profile(){
+  if [ -n "${FW_DEVICE_PROFILE:-}" ]; then
+    case "$FW_DEVICE_PROFILE" in
+      3270|7490|7530|7590) printf '%s' "$FW_DEVICE_PROFILE" ;;
+      *) printf '%s' unknown ;;
+    esac
+    return
+  fi
+  detected_model=$(detect_model)
+  case "$detected_model" in
+    *3270*) printf '%s' 3270 ;;
+    *7490*) printf '%s' 7490 ;;
+    *7530*) printf '%s' 7530 ;;
+    *7590*) printf '%s' 7590 ;;
+    *) printf '%s' unknown ;;
+  esac
 }
 
 detect_endianness(){
@@ -206,6 +258,7 @@ Commands:
   list             list cached packages
   search <query>   search cached package metadata
   info <name>      show one cached package record
+  compatible <name> [version]  check structured device compatibility
   verify <name> <version>  download and verify size + SHA-256
 
 This release performs no package installation and no firmware flash.
@@ -223,6 +276,7 @@ case "$command" in
   list) cmd_list "$@" ;;
   search) cmd_search "$@" ;;
   info) cmd_info "$@" ;;
+  compatible) cmd_compatible "$@" ;;
   verify) cmd_verify "$@" ;;
   help|-h|--help) cmd_help ;;
   *) fail 64 "unknown command: $command" ;;
