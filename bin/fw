@@ -148,11 +148,21 @@ cmd_device(){
   fi
 }
 
+detect_signature_verifier(){
+  if command -v usign >/dev/null 2>&1; then printf 'usign'
+  elif command -v signify >/dev/null 2>&1; then printf 'signify'
+  elif command -v signify-openbsd >/dev/null 2>&1; then printf 'signify'
+  else printf 'missing'
+  fi
+}
+
 cmd_doctor(){
   printf 'fw version: %s\n' "$VERSION"
   printf 'repository: %s\n' "$FW_INDEX_URL"
   printf 'fetcher: '; if command -v curl >/dev/null 2>&1; then printf 'curl\n'; elif command -v wget >/dev/null 2>&1; then printf 'wget\n'; else printf 'missing\n'; fi
   printf 'cache: %s\n' "$FW_CACHE_DIR"
+  printf 'signature verifier: %s\n' "$(detect_signature_verifier)"
+  printf 'signature enforcement: disabled\n'
 }
 cmd_help(){
   cat <<'EOF'
