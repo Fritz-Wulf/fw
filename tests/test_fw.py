@@ -15,7 +15,7 @@ class FwTest(unittest.TestCase):
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
-        self.assertIn("0.2.0", expected.stdout)
+        self.assertIn("0.2.1", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
             got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(got.stdout, expected.stdout)
@@ -55,6 +55,16 @@ class FwTest(unittest.TestCase):
             got = self.run_fw("verify", "fw", "0.1.0", env=env)
             self.assertNotEqual(got.returncode, 0)
             self.assertIn("checksum mismatch", got.stderr)
+
+    def test_doctor_reports_signature_verifier(self):
+        with tempfile.TemporaryDirectory() as bindir:
+            fake = Path(bindir) / "usign"
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            got = self.run_fw("doctor", env={"PATH": bindir + os.pathsep + os.environ["PATH"]})
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertIn("signature verifier: usign", got.stdout)
+            self.assertIn("signature enforcement: disabled", got.stdout)
 
     def test_device_json_has_safe_structured_fields(self):
         got = self.run_fw("--json", "device")
