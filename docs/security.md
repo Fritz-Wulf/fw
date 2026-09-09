@@ -15,3 +15,7 @@ The signed-repository phase must add a detached signature over a canonical repos
 ## Signature verifier discovery
 
 `fw doctor` reports whether `usign`, `signify`, or `signify-openbsd` is available on the target system. This is capability discovery only; until repository signing is implemented and validated end-to-end, the client reports `signature enforcement: disabled` and does not claim authenticated repository metadata.
+
+## Repository metadata integrity
+
+`fw update` downloads `SHA256SUMS`, `index.json`, and `Packages` into a staging directory. The client validates the SHA-256 of `index.json` and `Packages` against the downloaded manifest before replacing the active cache. A mismatch aborts the refresh and preserves the previous cache. This improves consistency and corruption detection but does not authenticate a maliciously replaced manifest; detached signature enforcement remains the next trust-boundary step.

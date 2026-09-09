@@ -7,9 +7,11 @@ VERSION=$(cat "$ROOT_DIR/VERSION" 2>/dev/null || printf '%s' '0.0.0-unknown')
 FW_REPO_BASE=${FW_REPO_BASE:-https://fritz-wulf.github.io/repo/}
 FW_INDEX_URL=${FW_REPO_INDEX_URL:-${FW_REPO_BASE%/}/index.json}
 FW_PACKAGES_URL=${FW_PACKAGES_URL:-${FW_REPO_BASE%/}/Packages}
+FW_SUMS_URL=${FW_SUMS_URL:-${FW_REPO_BASE%/}/SHA256SUMS}
 FW_CACHE_DIR=${FW_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/fritzwulf}
 INDEX_CACHE=$FW_CACHE_DIR/index.json
 PACKAGES_CACHE=$FW_CACHE_DIR/Packages
+SUMS_CACHE=$FW_CACHE_DIR/SHA256SUMS
 JSON=0
 QUIET=0
 
@@ -60,10 +62,36 @@ sha256_file(){
   fi
 }
 
+manifest_hash(){
+  manifest=$1; wanted=$2
+  awk -v f="$wanted" '$2==f {print $1; found=1; exit} END{if(!found) exit 1}' "$manifest"
+}
+
+verify_manifest_file(){
+  manifest=$1; filename=$2; filepath=$3
+  expected=$(manifest_hash "$manifest" "$filename") || fail 65 "repository manifest missing: $filename"
+  printf '%s' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || fail 65 "invalid repository checksum: $filename"
+  actual=$(sha256_file "$filepath") || fail 69 "no SHA-256 implementation available"
+  [ "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" = "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" ] || fail 65 "repository checksum mismatch: $filename"
+}
+
 cmd_update(){
-  atomic_fetch "$FW_INDEX_URL" "$INDEX_CACHE"
-  grep -q '"packages"' "$INDEX_CACHE" || fail 65 "index.json does not contain packages"
-  atomic_fetch "$FW_PACKAGES_URL" "$PACKAGES_CACHE"
+  mkdir -p "$FW_CACHE_DIR" || fail 73 "cannot create cache: $FW_CACHE_DIR"
+  stage=$(mktemp -d "$FW_CACHE_DIR/.update.XXXXXX") || fail 73 "cannot create update staging directory"
+  trap 'rm -rf "$stage"' 0 1 2 15
+  fetch_url "$FW_SUMS_URL" "$stage/SHA256SUMS" || fail 69 "download failed: $FW_SUMS_URL"
+  fetch_url "$FW_INDEX_URL" "$stage/index.json" || fail 69 "download failed: $FW_INDEX_URL"
+  fetch_url "$FW_PACKAGES_URL" "$stage/Packages" || fail 69 "download failed: $FW_PACKAGES_URL"
+  if [ ! -s "$stage/SHA256SUMS" ] || [ ! -s "$stage/index.json" ] || [ ! -s "$stage/Packages" ]; then
+    fail 65 "empty repository metadata download"
+  fi
+  grep -q '"packages"' "$stage/index.json" || fail 65 "index.json does not contain packages"
+  verify_manifest_file "$stage/SHA256SUMS" index.json "$stage/index.json"
+  verify_manifest_file "$stage/SHA256SUMS" Packages "$stage/Packages"
+  mv -f "$stage/index.json" "$INDEX_CACHE" || fail 73 "cannot activate index cache"
+  mv -f "$stage/Packages" "$PACKAGES_CACHE" || fail 73 "cannot activate package cache"
+  mv -f "$stage/SHA256SUMS" "$SUMS_CACHE" || fail 73 "cannot activate checksum manifest"
+  rmdir "$stage"; trap - 0 1 2 15
   log "repository updated: $FW_INDEX_URL"
 }
 cmd_list(){
