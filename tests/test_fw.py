@@ -131,6 +131,27 @@ class FwTest(unittest.TestCase):
         self.assertIn("endianness", data)
 
 
+    def test_verified_hw185_model_mapping_rejects_unknown_product_ids(self):
+        shell = self.command_for(FW)[0] if os.name == "nt" else "/bin/sh"
+        env = os.environ.copy()
+        env.pop("FW_DEVICE_PROFILE", None)
+        for model, expected in (
+            ("Fritz_Box_HW185", "7490"),
+            ("Fritz_Box_HW185X", "unknown"),
+            ("Fritz_Box_HW999", "unknown"),
+            ("FRITZ Box 7530", "7530"),
+        ):
+            with self.subTest(model=model):
+                snippet = (
+                    "set -- help; . ./bin/fw >/dev/null; "
+                    f"detect_model() {{ printf '%s' '{model}'; }}; "
+                    "detect_profile"
+                )
+                got = subprocess.run([shell, "-c", snippet], cwd=ROOT, env=env,
+                                     text=True, capture_output=True)
+                self.assertEqual(got.returncode, 0, got.stderr)
+                self.assertEqual(got.stdout, expected)
+
     def test_compatible_checks_structured_device_targets(self):
         with tempfile.TemporaryDirectory() as cache:
             env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache, "FW_DEVICE_PROFILE": "7490"}

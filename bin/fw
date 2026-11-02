@@ -202,6 +202,7 @@ detect_profile(){
   fi
   detected_model=$(detect_model)
   case "$detected_model" in
+    Fritz_Box_HW185) printf '%s' 7490 ;;
     *3270*) printf '%s' 3270 ;;
     *7490*) printf '%s' 7490 ;;
     *7530*) printf '%s' 7530 ;;
