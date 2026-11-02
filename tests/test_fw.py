@@ -6,18 +6,47 @@ FW = ROOT / "bin" / "fw"
 FIXTURE = ROOT / "tests" / "fixtures" / "repo"
 
 class FwTest(unittest.TestCase):
-    def run_fw(self, *args, env=None):
+    @staticmethod
+    def command_for(script):
+        if os.name != "nt":
+            return [str(script)]
+        git = shutil.which("git")
+        if not git:
+            raise RuntimeError("Git for Windows is required for POSIX shell tests")
+        bash = next((parent / "usr" / "bin" / "bash.exe" for parent in Path(git).resolve().parents
+                     if (parent / "usr" / "bin" / "bash.exe").is_file()), None)
+        if bash is None:
+            raise RuntimeError("Git for Windows bash.exe not found")
+        return [str(bash), script.relative_to(ROOT).as_posix()]
+
+    @staticmethod
+    def msys_path(value):
+        drive, tail = os.path.splitdrive(os.path.abspath(value))
+        if not drive:
+            return value
+        return "/" + drive[0].lower() + tail.replace("\\", "/")
+
+    def run_script(self, script, *args, env=None):
         merged = os.environ.copy()
         if env:
             merged.update(env)
-        return subprocess.run([str(FW), *args], cwd=ROOT, env=merged, text=True, capture_output=True)
+        if os.name == "nt":
+            if "FW_CACHE_DIR" in merged:
+                merged["FW_CACHE_DIR"] = self.msys_path(merged["FW_CACHE_DIR"])
+            base = merged.get("FW_REPO_BASE", "")
+            if base.startswith("file:///") and len(base) > 10 and base[8].isalpha() and base[9:11] == ":/":
+                merged["FW_REPO_BASE"] = "file:///" + base[8].lower() + base[10:]
+        return subprocess.run([*self.command_for(script), *args], cwd=ROOT, env=merged, text=True, capture_output=True)
+
+    def run_fw(self, *args, env=None):
+        return self.run_script(FW, *args, env=env)
 
     def test_version_and_aliases_are_identical(self):
         expected = self.run_fw("version")
         self.assertEqual(expected.returncode, 0, expected.stderr)
         self.assertIn("0.4.0", expected.stdout)
         for alias in (ROOT / "bin" / "fwulf", ROOT / "bin" / "fritzwulf"):
-            got = subprocess.run([str(alias), "version"], cwd=ROOT, text=True, capture_output=True)
+            got = self.run_script(alias, "version")
             self.assertEqual(got.stdout, expected.stdout)
             self.assertEqual(got.returncode, 0)
 
