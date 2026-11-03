@@ -204,9 +204,33 @@ class FwTest(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0, failed.stdout)
             self.assertIn("cannot activate cache generation", failed.stderr)
             self.assertEqual(self.active_generation(cache), first)
+            self.assertEqual(
+                {path.name for path in Path(cache).glob(".update.*")},
+                {first.name},
+                "failed activation left an orphaned cache generation",
+            )
             listed = self.run_fw("list", env=env)
             self.assertEqual(listed.returncode, 0, listed.stderr)
             self.assertEqual(listed.stdout, first_list.stdout)
+
+    def test_rename_reports_failure_after_commit_preserves_published_generation(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as bindir:
+            fake_mv = Path(bindir) / "mv"
+            fake_mv.write_text(
+                '#!/bin/sh\ncase "$*" in *CURRENT) /usr/bin/mv "$@"; exit 88;; esac\n'
+                'exec /usr/bin/mv "$@"\n', encoding="utf-8"
+            )
+            fake_mv.chmod(0o755)
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache,
+                   "PATH": bindir + os.pathsep + os.environ["PATH"]}
+            got = self.run_fw("update", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("cannot activate cache generation", got.stderr)
+            generation = self.active_generation(cache)
+            self.assertTrue(generation.is_dir(), "published data must never be removed")
+            listed = self.run_fw("list", env=env)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertIn("fw\t0.1.0", listed.stdout)
 
     def test_unsafe_current_pointer_never_falls_back_to_legacy_cache(self):
         with tempfile.TemporaryDirectory() as cache:

@@ -117,7 +117,15 @@ cmd_update(){
   fi
   # Do not remove a validated generation after its pointer may be activated.
   trap - 0 1 2 15
-  mv -f "$pointer_tmp" "$FW_CACHE_DIR/CURRENT" || { rm -f "$pointer_tmp"; fail 73 "cannot activate cache generation"; }
+  if ! mv -f "$pointer_tmp" "$FW_CACHE_DIR/CURRENT"; then
+    # Same-filesystem rename left its source intact: activation did not commit.
+    # If the source disappeared, retain the generation; it may be in use.
+    if [ -f "$pointer_tmp" ] && [ ! -L "$pointer_tmp" ]; then
+      rm -f "$pointer_tmp"
+      rm -rf "$stage"
+    fi
+    fail 73 "cannot activate cache generation"
+  fi
   log "repository updated: $FW_INDEX_URL"
 }
 cmd_list(){
