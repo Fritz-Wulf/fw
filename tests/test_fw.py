@@ -26,6 +26,11 @@ class FwTest(unittest.TestCase):
             return value
         return "/" + drive[0].lower() + tail.replace("\\", "/")
 
+    @staticmethod
+    def active_generation(cache):
+        current = Path(cache) / "CURRENT"
+        return Path(cache) / current.read_text(encoding="utf-8").strip()
+
     def run_script(self, script, *args, env=None):
         merged = os.environ.copy()
         if env:
@@ -60,8 +65,8 @@ class FwTest(unittest.TestCase):
             env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
             updated = self.run_fw("update", env=env)
             self.assertEqual(updated.returncode, 0, updated.stderr)
-            self.assertTrue((Path(cache) / "index.json").is_file())
-            self.assertTrue((Path(cache) / "Packages").is_file())
+            self.assertTrue((self.active_generation(cache) / "index.json").is_file())
+            self.assertTrue((self.active_generation(cache) / "Packages").is_file())
             listed = self.run_fw("list", env=env)
             self.assertIn("fw\t0.1.0\tall\tno", listed.stdout)
             self.assertIn("yourfritz-fitdump", listed.stdout)
@@ -80,7 +85,7 @@ class FwTest(unittest.TestCase):
             env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
             got = self.run_fw("update", env=env)
             self.assertEqual(got.returncode, 0, got.stderr)
-            sums = Path(cache) / "SHA256SUMS"
+            sums = self.active_generation(cache) / "SHA256SUMS"
             self.assertTrue(sums.is_file())
             self.assertIn("index.json", sums.read_text())
             self.assertIn("Packages", sums.read_text())
@@ -89,8 +94,9 @@ class FwTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as bad_repo:
             env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
             self.assertEqual(self.run_fw("update", env=env).returncode, 0)
-            before_index = (Path(cache) / "index.json").read_bytes()
-            before_packages = (Path(cache) / "Packages").read_bytes()
+            before_generation = self.active_generation(cache)
+            before_index = (before_generation / "index.json").read_bytes()
+            before_packages = (before_generation / "Packages").read_bytes()
             shutil.copytree(FIXTURE, bad_repo, dirs_exist_ok=True)
             packages = Path(bad_repo) / "Packages"
             packages.write_text(packages.read_text() + "\n# tampered\n", encoding="utf-8")
@@ -98,14 +104,15 @@ class FwTest(unittest.TestCase):
             got = self.run_fw("update", env=bad_env)
             self.assertNotEqual(got.returncode, 0)
             self.assertIn("repository checksum mismatch", got.stderr)
-            self.assertEqual((Path(cache) / "index.json").read_bytes(), before_index)
-            self.assertEqual((Path(cache) / "Packages").read_bytes(), before_packages)
+            self.assertEqual(self.active_generation(cache), before_generation)
+            self.assertEqual((before_generation / "index.json").read_bytes(), before_index)
+            self.assertEqual((before_generation / "Packages").read_bytes(), before_packages)
 
     def test_verify_fails_closed_on_checksum_mismatch(self):
         with tempfile.TemporaryDirectory() as cache:
             env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
             self.assertEqual(self.run_fw("update", env=env).returncode, 0)
-            bad = Path(cache) / "Packages"
+            bad = self.active_generation(cache) / "Packages"
             bad.write_text(bad.read_text().replace("32dfcc02", "02dfcc02"), encoding="utf-8")
             got = self.run_fw("verify", "fw", "0.1.0", env=env)
             self.assertNotEqual(got.returncode, 0)
@@ -151,6 +158,64 @@ class FwTest(unittest.TestCase):
                                      text=True, capture_output=True)
                 self.assertEqual(got.returncode, 0, got.stderr)
                 self.assertEqual(got.stdout, expected)
+
+    def test_update_activates_validated_generation_and_fails_closed_on_tamper(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            updated = self.run_fw("update", env=env)
+            self.assertEqual(updated.returncode, 0, updated.stderr)
+            current = Path(cache) / "CURRENT"
+            self.assertTrue(current.is_file(), "No single atomic cache generation pointer")
+            name = current.read_text(encoding="utf-8").strip()
+            self.assertTrue(name.startswith(".update."), name)
+            generation = Path(cache) / name
+            for filename in ("index.json", "Packages", "SHA256SUMS"):
+                self.assertTrue((generation / filename).is_file(), filename)
+            packages = generation / "Packages"
+            before = packages.read_bytes()
+            packages.write_bytes(before + b"\n# tampered\n")
+            rejected = self.run_fw("list", env=env)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("repository checksum mismatch", rejected.stderr)
+            self.assertEqual(current.read_text(encoding="utf-8").strip(), name)
+
+    def test_failed_pointer_commit_keeps_prior_generation_and_package_list(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as bindir:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            initial = self.run_fw("update", env=env)
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            first = self.active_generation(cache)
+            first_list = self.run_fw("list", env=env)
+            self.assertEqual(first_list.returncode, 0, first_list.stderr)
+            shutil.copytree(FIXTURE, repo, dirs_exist_ok=True)
+            packages = Path(repo) / "Packages"
+            index = Path(repo) / "index.json"
+            packages.write_text(packages.read_text().replace("Version: 0.1.0", "Version: 0.1.9", 1), encoding="utf-8")
+            index.write_text(index.read_text().replace("0.1.0", "0.1.9", 1), encoding="utf-8")
+            (Path(repo) / "SHA256SUMS").write_text(
+                f"{hashlib.sha256(index.read_bytes()).hexdigest()}  index.json\n"
+                f"{hashlib.sha256(packages.read_bytes()).hexdigest()}  Packages\n", encoding="utf-8")
+            fake_mv = Path(bindir) / "mv"
+            fake_mv.write_text('#!/bin/sh\ncase "$*" in *CURRENT) exit 88;; esac\nexec /usr/bin/mv "$@"\n', encoding="utf-8")
+            fake_mv.chmod(0o755)
+            blocked_env = {"FW_REPO_BASE": Path(repo).as_uri() + "/", "FW_CACHE_DIR": cache,
+                           "PATH": bindir + os.pathsep + os.environ["PATH"]}
+            failed = self.run_fw("update", env=blocked_env)
+            self.assertNotEqual(failed.returncode, 0, failed.stdout)
+            self.assertIn("cannot activate cache generation", failed.stderr)
+            self.assertEqual(self.active_generation(cache), first)
+            listed = self.run_fw("list", env=env)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertEqual(listed.stdout, first_list.stdout)
+
+    def test_unsafe_current_pointer_never_falls_back_to_legacy_cache(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            (Path(cache) / "CURRENT").write_text("../escape\n", encoding="utf-8")
+            got = self.run_fw("list", env=env)
+            self.assertNotEqual(got.returncode, 0)
+            self.assertIn("unsafe cache generation", got.stderr)
 
     def test_compatible_checks_structured_device_targets(self):
         with tempfile.TemporaryDirectory() as cache:

@@ -53,7 +53,27 @@ atomic_fetch(){
   mv -f "$tmp" "$target" || { rm -f "$tmp"; fail 73 "cannot activate cache file"; }
 }
 
-ensure_feed(){ [ -s "$PACKAGES_CACHE" ] || fail 69 "package cache missing; run: fw update"; }
+ensure_feed(){
+  # A reader pins one complete generation. Never fall back if CURRENT is invalid.
+  current=$FW_CACHE_DIR/CURRENT
+  if [ -e "$current" ] || [ -L "$current" ]; then
+    [ -f "$current" ] && [ ! -L "$current" ] || fail 65 "invalid cache pointer"
+    IFS= read -r generation < "$current" || fail 65 "invalid cache pointer"
+    case "$generation" in
+      .update.[A-Za-z0-9]*)
+        case "$generation" in *[!A-Za-z0-9._-]*|*..*) fail 65 "unsafe cache generation" ;; esac ;;
+      *) fail 65 "unsafe cache generation" ;;
+    esac
+    [ -d "$FW_CACHE_DIR/$generation" ] && [ ! -L "$FW_CACHE_DIR/$generation" ] || fail 65 "cache generation missing"
+    INDEX_CACHE=$FW_CACHE_DIR/$generation/index.json
+    PACKAGES_CACHE=$FW_CACHE_DIR/$generation/Packages
+    SUMS_CACHE=$FW_CACHE_DIR/$generation/SHA256SUMS
+  fi
+  [ -s "$PACKAGES_CACHE" ] || fail 69 "package cache missing; run: fw update"
+  [ -s "$INDEX_CACHE" ] && [ -s "$SUMS_CACHE" ] || fail 65 "incomplete repository cache"
+  verify_manifest_file "$SUMS_CACHE" index.json "$INDEX_CACHE"
+  verify_manifest_file "$SUMS_CACHE" Packages "$PACKAGES_CACHE"
+}
 sha256_file(){
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v busybox >/dev/null 2>&1; then busybox sha256sum "$1" | awk '{print $1}'
@@ -88,10 +108,16 @@ cmd_update(){
   grep -q '"packages"' "$stage/index.json" || fail 65 "index.json does not contain packages"
   verify_manifest_file "$stage/SHA256SUMS" index.json "$stage/index.json"
   verify_manifest_file "$stage/SHA256SUMS" Packages "$stage/Packages"
-  mv -f "$stage/index.json" "$INDEX_CACHE" || fail 73 "cannot activate index cache"
-  mv -f "$stage/Packages" "$PACKAGES_CACHE" || fail 73 "cannot activate package cache"
-  mv -f "$stage/SHA256SUMS" "$SUMS_CACHE" || fail 73 "cannot activate checksum manifest"
-  rmdir "$stage"; trap - 0 1 2 15
+  # A single rename publishes the three validated files together.
+  # Old generations stay available to readers that already pinned them.
+  pointer_tmp=$(mktemp "$FW_CACHE_DIR/.current.XXXXXX") || fail 73 "cannot stage cache pointer"
+  printf '%s\n' "${stage##*/}" > "$pointer_tmp" || { rm -f "$pointer_tmp"; fail 73 "cannot write cache pointer"; }
+  if [ -d "$FW_CACHE_DIR/CURRENT" ] || [ -L "$FW_CACHE_DIR/CURRENT" ]; then
+    rm -f "$pointer_tmp"; fail 65 "invalid cache pointer target"
+  fi
+  # Do not remove a validated generation after its pointer may be activated.
+  trap - 0 1 2 15
+  mv -f "$pointer_tmp" "$FW_CACHE_DIR/CURRENT" || { rm -f "$pointer_tmp"; fail 73 "cannot activate cache generation"; }
   log "repository updated: $FW_INDEX_URL"
 }
 cmd_list(){
