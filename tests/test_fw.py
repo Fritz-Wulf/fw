@@ -331,6 +331,68 @@ class FwTest(unittest.TestCase):
                         process.communicate(timeout=5)
 
 
+
+    @unittest.skipIf(os.name == "nt", "Linux subprocess race needs POSIX shim PATH")
+    def test_no_flock_simultaneous_writers_cannot_bypass_generation_limit(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as bindir:
+            shim = Path(bindir)
+            for binary in ("dirname", "cat", "awk", "sed", "grep", "sha256sum",
+                           "tr", "cp", "mv", "rm", "mkdir", "rmdir", "head", "wc", "uname"):
+                source = shutil.which(binary)
+                self.assertIsNotNone(source, binary)
+                (shim / binary).symlink_to(source)
+            entered, released = shim / "stage-entered", shim / "stage-released"
+            fake = shim / "mktemp"
+            fake.write_text(
+                '#!/bin/sh\ncase "$*" in *".update."*)\n'
+                ': > "$FW_TEST_STAGE_ENTERED"\n'
+                'while [ ! -e "$FW_TEST_STAGE_RELEASED" ]; do /usr/bin/sleep 0.02; done\n'
+                ';; esac\nexec /usr/bin/mktemp "$@"\n', encoding="utf-8"
+            )
+            fake.chmod(0o755)
+            env = {**os.environ, "PATH": str(shim),
+                   "FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache,
+                   "FW_TEST_STAGE_ENTERED": str(entered),
+                   "FW_TEST_STAGE_RELEASED": str(released)}
+            self.assertIsNone(shutil.which("flock", path=str(shim)))
+            procs = []
+            try:
+                procs.append(subprocess.Popen([*self.command_for(FW), "update"],
+                                              cwd=ROOT, env=env, text=True,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                deadline = time.monotonic() + 8
+                while not entered.exists() and time.monotonic() < deadline:
+                    time.sleep(0.025)
+                self.assertTrue(entered.exists(), "first updater never staged")
+                for _ in range(2):
+                    procs.append(subprocess.Popen([*self.command_for(FW), "update"],
+                                                  cwd=ROOT, env=env, text=True,
+                                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                time.sleep(0.3)
+                released.touch()
+                results = []
+                for proc in procs:
+                    stdout, stderr = proc.communicate(timeout=10)
+                    results.append((proc.returncode, stdout, stderr))
+                successes = [item for item in results if item[0] == 0]
+                generations = [p for p in Path(cache).glob(".update.*") if p.is_dir()]
+                self.assertEqual(len(successes), 1, results)
+                self.assertEqual(len(generations), 1, generations)
+                self.assertTrue((Path(cache) / "CURRENT").is_file())
+                self.assertTrue(self.active_generation(cache).is_dir())
+                self.assertTrue((Path(cache) / ".no-flock-mode").is_dir())
+                self.assertFalse((Path(cache) / ".no-flock-writer").exists())
+                mixed = self.run_fw("list", env={"FW_CACHE_DIR": cache,
+                                                 "FW_REPO_BASE": FIXTURE.as_uri() + "/"})
+                self.assertNotEqual(mixed.returncode, 0)
+                self.assertIn("cache created without flock", mixed.stderr)
+            finally:
+                released.touch()
+                for proc in procs:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.communicate(timeout=5)
+
     @unittest.skipUnless(os.name == "nt", "No-flock fallback exercised on Git Bash")
     def test_no_flock_reader_refuses_cache_owned_by_flock_mode(self):
         with tempfile.TemporaryDirectory() as cache:
@@ -341,6 +403,18 @@ class FwTest(unittest.TestCase):
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("cache requires flock", blocked.stderr)
             self.assertTrue((Path(cache) / "CURRENT").is_file())
+
+
+    @unittest.skipUnless(os.name == "nt", "No-flock fallback exercised on Git Bash")
+    def test_no_flock_stale_writer_lock_fails_closed(self):
+        with tempfile.TemporaryDirectory() as cache:
+            (Path(cache) / ".no-flock-writer").mkdir()
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            blocked = self.run_fw("update", env=env)
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("no-flock update already running", blocked.stderr)
+            self.assertFalse((Path(cache) / "CURRENT").exists())
+            self.assertTrue((Path(cache) / ".no-flock-writer").is_dir())
 
     def test_compatible_checks_structured_device_targets(self):
         with tempfile.TemporaryDirectory() as cache:

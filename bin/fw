@@ -66,9 +66,15 @@ cache_lock(){
     return 1
   fi
   mkdir -p "$FW_CACHE_DIR" || fail 73 "cannot create cache: $FW_CACHE_DIR"
+  [ ! -e "$FW_CACHE_DIR/.no-flock-mode" ] &&
+    [ ! -L "$FW_CACHE_DIR/.no-flock-mode" ] ||
+    fail 73 "cache created without flock; refusing mixed-mode access"
   [ ! -L "$FW_CACHE_DIR/.cache.lock" ] || fail 65 "unsafe cache lock"
   exec 9>> "$FW_CACHE_DIR/.cache.lock" || fail 73 "cannot open cache lock"
   flock "$lock_mode" 9 || fail 73 "cannot acquire cache lock"
+  [ ! -e "$FW_CACHE_DIR/.no-flock-mode" ] &&
+    [ ! -L "$FW_CACHE_DIR/.no-flock-mode" ] ||
+    fail 73 "cache created without flock; refusing mixed-mode access"
 }
 
 # Without flock we must never unlink a generation that a reader could use.
@@ -158,10 +164,24 @@ cmd_update(){
     can_prune=1
   else
     can_prune=0
+    # mkdir is atomic on the cache filesystem, even without flock. A stale
+    # lock after an abnormal termination is intentionally fail-closed.
+    no_flock_writer_dir=$FW_CACHE_DIR/.no-flock-writer
+    mkdir "$no_flock_writer_dir" 2>/dev/null ||
+      fail 73 "no-flock update already running (or stale writer lock)"
+    trap 'rmdir "$no_flock_writer_dir" 2>/dev/null || :' 0 1 2 15
+    if ! mkdir "$FW_CACHE_DIR/.no-flock-mode" 2>/dev/null; then
+      [ -d "$FW_CACHE_DIR/.no-flock-mode" ] &&
+        [ ! -L "$FW_CACHE_DIR/.no-flock-mode" ] ||
+        fail 65 "invalid no-flock cache mode"
+    fi
+    [ ! -e "$FW_CACHE_DIR/.cache.lock" ] &&
+      [ ! -L "$FW_CACHE_DIR/.cache.lock" ] ||
+      fail 73 "cache requires flock; refusing mixed-mode update"
     cache_no_flock_bound
   fi
   stage=$(mktemp -d "$FW_CACHE_DIR/.update.XXXXXX") || fail 73 "cannot create update staging directory"
-  trap 'rm -rf "$stage"' 0 1 2 15
+  trap 'rm -rf "$stage"; [ "$can_prune" -ne 0 ] || rmdir "$no_flock_writer_dir" 2>/dev/null || :' 0 1 2 15
   fetch_url "$FW_SUMS_URL" "$stage/SHA256SUMS" || fail 69 "download failed: $FW_SUMS_URL"
   fetch_url "$FW_INDEX_URL" "$stage/index.json" || fail 69 "download failed: $FW_INDEX_URL"
   fetch_url "$FW_PACKAGES_URL" "$stage/Packages" || fail 69 "download failed: $FW_PACKAGES_URL"
@@ -178,8 +198,9 @@ cmd_update(){
   if [ -d "$FW_CACHE_DIR/CURRENT" ] || [ -L "$FW_CACHE_DIR/CURRENT" ]; then
     rm -f "$pointer_tmp"; fail 65 "invalid cache pointer target"
   fi
-  # Do not remove a validated generation after its pointer may be activated.
-  trap - 0 1 2 15
+  # After validation, retain the generation on ambiguous commit failure.
+  # Keep the no-flock writer mutex until the pointer is fully published.
+  trap '[ "$can_prune" -ne 0 ] || rmdir "$no_flock_writer_dir" 2>/dev/null || :' 0 1 2 15
   if ! mv -f "$pointer_tmp" "$FW_CACHE_DIR/CURRENT"; then
     # Same-filesystem rename left its source intact: activation did not commit.
     # If the source disappeared, retain the generation; it may be in use.
@@ -191,6 +212,10 @@ cmd_update(){
   fi
   # Only the exclusive lock proves that no reader still uses an older snapshot.
   [ "$can_prune" -eq 0 ] || cache_prune_locked "$stage"
+  if [ "$can_prune" -eq 0 ]; then
+    rmdir "$no_flock_writer_dir" || fail 73 "cannot release no-flock writer lock"
+  fi
+  trap - 0 1 2 15
   log "repository updated: $FW_INDEX_URL"
 }
 cmd_list(){
@@ -366,8 +391,10 @@ Cache policy:
   fw update recreates it explicitly after reboot.
   FW_CACHE_AUTO_REFRESH=1 opts in to refetch on a completely missing cache.
   Automatic refresh is OFF by default: repository signatures are not enforced.
-  flock protects concurrent readers; without flock, updates stop at 2
-  retained generations instead of deleting files still in use.
+  flock protects concurrent readers; without flock an atomic mkdir
+  serializes writers and updates stop at 2 retained generations.
+  An abandoned no-flock writer lock fails closed; inspect before removal.
+  Mixing flock and no-flock cache modes is not supported.
 
 This release performs no package installation and no firmware flash.
 EOF
