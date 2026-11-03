@@ -1,4 +1,4 @@
-import hashlib, json, os, shutil, subprocess, tempfile, unittest
+import hashlib, json, os, shutil, subprocess, tempfile, time, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -240,6 +240,107 @@ class FwTest(unittest.TestCase):
             got = self.run_fw("list", env=env)
             self.assertNotEqual(got.returncode, 0)
             self.assertIn("unsafe cache generation", got.stderr)
+            opted_in = self.run_fw("list", env={**env, "FW_CACHE_AUTO_REFRESH": "1"})
+            self.assertNotEqual(opted_in.returncode, 0)
+            self.assertIn("unsafe cache generation", opted_in.stderr)
+            self.assertEqual((Path(cache) / "CURRENT").read_text(), "../escape\n")
+
+
+    def test_tmpfs_reset_can_refetch_only_with_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            first = self.run_fw("list", env=env)
+            self.assertNotEqual(first.returncode, 0)
+            self.assertFalse((Path(cache) / "CURRENT").exists())
+            opt_in = {**env, "FW_CACHE_AUTO_REFRESH": "1"}
+            refreshed = self.run_fw("list", env=opt_in)
+            self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+            self.assertIn("fw\t0.1.0", refreshed.stdout)
+            first_gen = self.active_generation(cache).name
+            shutil.rmtree(cache)
+            Path(cache).mkdir()
+            after_restart = self.run_fw("list", env=opt_in)
+            self.assertEqual(after_restart.returncode, 0, after_restart.stderr)
+            self.assertIn("fw\t0.1.0", after_restart.stdout)
+            self.assertTrue((Path(cache) / "CURRENT").is_file())
+            self.assertNotEqual(self.active_generation(cache).name, first_gen)
+
+    def test_tmpfs_retention_bounds_generations_when_flock_available(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            results = [self.run_fw("update", env=env) for _ in range(3)]
+            generations = [p for p in Path(cache).glob(".update.*") if p.is_dir()]
+            if os.name == "nt":
+                self.assertEqual([r.returncode for r in results[:2]], [0, 0])
+                self.assertNotEqual(results[2].returncode, 0)
+                self.assertIn("flock unavailable", results[2].stderr)
+                self.assertEqual(len(generations), 2)
+            else:
+                for result in results:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(generations), 1, "gc left unused generations")
+            self.assertEqual(self.run_fw("list", env=env).returncode, 0)
+
+    @unittest.skipIf(os.name == "nt", "Windows Git Bash has no flock; fallback tested separately")
+    def test_flock_reader_survives_concurrent_update_and_gc(self):
+        if not shutil.which("flock"):
+            self.skipTest("No POSIX flock on this host")
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as bindir:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            first = self.active_generation(cache)
+            ready, release = Path(bindir) / "reader-ready", Path(bindir) / "reader-release"
+            fake = Path(bindir) / "awk"
+            fake.write_text(
+                '#!/bin/sh\necho ready > "$FW_TEST_READER_READY"\n'
+                'while [ ! -e "$FW_TEST_READER_RELEASE" ]; do sleep 0.05; done\n'
+                'exec /usr/bin/awk "$@"\n', encoding="utf-8"
+            )
+            fake.chmod(0o755)
+            reader_env = {**os.environ, **env, "PATH": bindir + os.pathsep + os.environ["PATH"],
+                          "FW_TEST_READER_READY": str(ready),
+                          "FW_TEST_READER_RELEASE": str(release)}
+            reader = subprocess.Popen([*self.command_for(FW), "list"], cwd=ROOT,
+                                      env=reader_env, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+            updater = None
+            try:
+                deadline = time.monotonic() + 7
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.025)
+                self.assertTrue(ready.exists(), "Reader did not reach protected metadata read")
+                updater = subprocess.Popen([*self.command_for(FW), "update"], cwd=ROOT,
+                                           env={**os.environ, **env}, text=True,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                time.sleep(0.2)
+                self.assertIsNone(updater.poll(), "Updater pruned cache before reader released")
+                self.assertTrue(first.is_dir())
+                release.touch()
+                read_out, read_err = reader.communicate(timeout=10)
+                update_out, update_err = updater.communicate(timeout=10)
+                self.assertEqual(reader.returncode, 0, read_err)
+                self.assertEqual(updater.returncode, 0, update_err)
+                self.assertIn("fw\t0.1.0", read_out)
+                self.assertNotEqual(self.active_generation(cache), first)
+                self.assertEqual(len(list(Path(cache).glob(".update.*"))), 1)
+            finally:
+                release.touch()
+                for process in (reader, updater):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.communicate(timeout=5)
+
+
+    @unittest.skipUnless(os.name == "nt", "No-flock fallback exercised on Git Bash")
+    def test_no_flock_reader_refuses_cache_owned_by_flock_mode(self):
+        with tempfile.TemporaryDirectory() as cache:
+            env = {"FW_REPO_BASE": FIXTURE.as_uri() + "/", "FW_CACHE_DIR": cache}
+            self.assertEqual(self.run_fw("update", env=env).returncode, 0)
+            (Path(cache) / ".cache.lock").touch()
+            blocked = self.run_fw("list", env=env)
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("cache requires flock", blocked.stderr)
+            self.assertTrue((Path(cache) / "CURRENT").is_file())
 
     def test_compatible_checks_structured_device_targets(self):
         with tempfile.TemporaryDirectory() as cache:

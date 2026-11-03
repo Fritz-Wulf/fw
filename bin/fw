@@ -53,7 +53,64 @@ atomic_fetch(){
   mv -f "$tmp" "$target" || { rm -f "$tmp"; fail 73 "cannot activate cache file"; }
 }
 
+# A shared lock is held until the reader process exits. Writers take the
+# exclusive lock, so no generation can be pruned while a reader uses it.
+# Freetz BusyBox and native Linux provide flock; Git Bash may not.
+cache_lock(){
+  lock_mode=$1
+  # Never let an unprotected reader coexist with flock-protected pruning.
+  # A lock file means this cache has been accessed in flock-capable mode.
+  if ! command -v flock >/dev/null 2>&1; then
+    [ ! -e "$FW_CACHE_DIR/.cache.lock" ] && [ ! -L "$FW_CACHE_DIR/.cache.lock" ] ||
+      fail 73 "cache requires flock; refusing unprotected access"
+    return 1
+  fi
+  mkdir -p "$FW_CACHE_DIR" || fail 73 "cannot create cache: $FW_CACHE_DIR"
+  [ ! -L "$FW_CACHE_DIR/.cache.lock" ] || fail 65 "unsafe cache lock"
+  exec 9>> "$FW_CACHE_DIR/.cache.lock" || fail 73 "cannot open cache lock"
+  flock "$lock_mode" 9 || fail 73 "cannot acquire cache lock"
+}
+
+# Without flock we must never unlink a generation that a reader could use.
+# Refuse further updates after two generations rather than grow indefinitely.
+cache_no_flock_bound(){
+  generation_count=0
+  for candidate in "$FW_CACHE_DIR"/.update.*; do
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
+    generation_count=$((generation_count + 1))
+  done
+  [ "$generation_count" -lt 2 ] || fail 73 "flock unavailable: cache at two-generation safety limit"
+}
+
+# Only call while holding an exclusive flock lock. Current readers have exited
+# and future readers cannot start until pruning is complete.
+cache_prune_locked(){
+  active_generation=$1
+  for candidate in "$FW_CACHE_DIR"/.update.*; do
+    [ "$candidate" != "$active_generation" ] || continue
+    case "${candidate##*/}" in
+      .update.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+      *) continue ;;
+    esac
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
+    rm -rf "$candidate" || fail 73 "cannot prune unused cache generation"
+  done
+}
+
 ensure_feed(){
+  # Only an explicitly opted-in reader refetches after a volatile tmpfs reset.
+  # Never auto-repair a partially present or invalid cache.
+  if [ "${FW_CACHE_AUTO_REFRESH:-0}" = 1 ] &&
+     [ ! -e "$FW_CACHE_DIR/CURRENT" ] && [ ! -L "$FW_CACHE_DIR/CURRENT" ] &&
+     [ ! -e "$PACKAGES_CACHE" ] && [ ! -L "$PACKAGES_CACHE" ] &&
+     [ ! -e "$INDEX_CACHE" ] && [ ! -L "$INDEX_CACHE" ] &&
+     [ ! -e "$SUMS_CACHE" ] && [ ! -L "$SUMS_CACHE" ]; then
+    old_quiet=$QUIET
+    QUIET=1
+    cmd_update
+    QUIET=$old_quiet
+  fi
+  cache_lock -s || :
   # A reader pins one complete generation. Never fall back if CURRENT is invalid.
   current=$FW_CACHE_DIR/CURRENT
   if [ -e "$current" ] || [ -L "$current" ]; then
@@ -97,6 +154,12 @@ verify_manifest_file(){
 
 cmd_update(){
   mkdir -p "$FW_CACHE_DIR" || fail 73 "cannot create cache: $FW_CACHE_DIR"
+  if cache_lock -x; then
+    can_prune=1
+  else
+    can_prune=0
+    cache_no_flock_bound
+  fi
   stage=$(mktemp -d "$FW_CACHE_DIR/.update.XXXXXX") || fail 73 "cannot create update staging directory"
   trap 'rm -rf "$stage"' 0 1 2 15
   fetch_url "$FW_SUMS_URL" "$stage/SHA256SUMS" || fail 69 "download failed: $FW_SUMS_URL"
@@ -109,7 +172,7 @@ cmd_update(){
   verify_manifest_file "$stage/SHA256SUMS" index.json "$stage/index.json"
   verify_manifest_file "$stage/SHA256SUMS" Packages "$stage/Packages"
   # A single rename publishes the three validated files together.
-  # Old generations stay available to readers that already pinned them.
+  # Shared reader locks prevent cleanup until all prior readers have exited.
   pointer_tmp=$(mktemp "$FW_CACHE_DIR/.current.XXXXXX") || fail 73 "cannot stage cache pointer"
   printf '%s\n' "${stage##*/}" > "$pointer_tmp" || { rm -f "$pointer_tmp"; fail 73 "cannot write cache pointer"; }
   if [ -d "$FW_CACHE_DIR/CURRENT" ] || [ -L "$FW_CACHE_DIR/CURRENT" ]; then
@@ -126,6 +189,8 @@ cmd_update(){
     fi
     fail 73 "cannot activate cache generation"
   fi
+  # Only the exclusive lock proves that no reader still uses an older snapshot.
+  [ "$can_prune" -eq 0 ] || cache_prune_locked "$stage"
   log "repository updated: $FW_INDEX_URL"
 }
 cmd_list(){
@@ -295,6 +360,14 @@ Commands:
   info <name>      show one cached package record
   compatible <name> [version]  check structured device compatibility
   verify <name> <version>  download and verify size + SHA-256
+
+Cache policy:
+  The default cache is volatile on Freetz (/var/tmp on tmpfs).
+  fw update recreates it explicitly after reboot.
+  FW_CACHE_AUTO_REFRESH=1 opts in to refetch on a completely missing cache.
+  Automatic refresh is OFF by default: repository signatures are not enforced.
+  flock protects concurrent readers; without flock, updates stop at 2
+  retained generations instead of deleting files still in use.
 
 This release performs no package installation and no firmware flash.
 EOF
