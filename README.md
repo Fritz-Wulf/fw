@@ -60,5 +60,3 @@ Historical source snapshots remain visible but are not silently treated as insta
 sh -n bin/fw bin/fwulf bin/fritzwulf
 python3 -m unittest -q tests.test_fw
 ```
-
-See `AGENTS.md` for the full development and release contract.
